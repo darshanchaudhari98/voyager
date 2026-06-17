@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-primary: #0d0d0d;
+    --bg-card: rgba(255, 255, 255, 0.03);
+    --bg-elevated: rgba(255, 255, 255, 0.055);
+    --border-card: rgba(255, 255, 255, 0.06);
+    --border-divider: rgba(255, 255, 255, 0.08);
+    --text-primary: #f5f5f0;
+    --text-secondary: rgba(245, 245, 240, 0.55);
+    --text-muted: rgba(245, 245, 240, 0.3);
+    --accent-coral: #e85d3e;
+    --accent-gold: #c9962e;
+    --accent-green: #4ade80;
+    --accent-blue: #60a5fa;
+    --status-running: #e85d3e;
+    --status-completed: #4ade80;
+    --status-waiting: #f59e0b;
+    --status-idle: #60a5fa;
+  }
+
+  html,
+  body {
+    color-scheme: dark;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer components {
+  .font-mono-geist {
+    font-family: var(--font-geist-mono), "Geist Mono", ui-monospace, monospace;
+  }
+}
+
+/* Custom scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) transparent;
+}
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--border-card);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.2);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.4s ease-out both;
+}
+
+/* Responsive layout */
+@media (max-width: 1024px) {
+  .agent-cards-grid {
+    grid-template-columns: repeat(3, 1fr) !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-main {
+    margin-left: 0 !important;
+    padding: 16px !important;
+    padding-top: 76px !important;
+  }
+  .app-sidebar {
+    display: none !important;
+  }
+  .agent-cards-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  .two-column-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .agent-cards-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
