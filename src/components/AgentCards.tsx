@@ -39,7 +39,8 @@ interface Metric {
 function agentStatus(
   agent: AgentName,
   runs: AgentRunRow[],
-  workflow: WorkflowRow | null
+  workflow: WorkflowRow | null,
+  context: SharedContext
 ): CardStatus {
   const awaitingApproval = workflow?.status === "awaiting_approval";
   const awaitingSelection = workflow?.status === "awaiting_selection";
@@ -54,8 +55,20 @@ function agentStatus(
   if (
     (awaitingApproval || awaitingSelection || awaitingReview) &&
     workflow?.current_agent === agent
-  )
+  ) {
+    // If a selection is pending but the live options haven't arrived yet,
+    // the agent is still fetching — keep it RUNNING until the data lands.
+    if (awaitingSelection) {
+      const loaded =
+        agent === "flight"
+          ? (context.flight?.options?.length ?? 0) > 0
+          : agent === "hotel"
+          ? (context.hotel?.options?.length ?? 0) > 0
+          : true;
+      if (!loaded) return "running";
+    }
     return "waiting";
+  }
 
   // While the orchestrator is actively on this agent, keep showing RUNNING.
   // This avoids a brief "COMPLETED" flash between an agent finishing its run
@@ -170,7 +183,7 @@ export function AgentCards({
       style={{ marginTop: "32px", gridTemplateColumns: "repeat(5, 1fr)" }}
     >
       {AGENTS.map(({ agent, name, icon: Icon }) => {
-        const st = agentStatus(agent, agentRuns, workflow);
+        const st = agentStatus(agent, agentRuns, workflow, context);
         const status = statusConfig[st];
         const metrics = metricsFor(agent, context, workflow);
 

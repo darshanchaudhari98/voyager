@@ -198,14 +198,19 @@ export function Dashboard() {
         <Footer workflow={workflow} />
       </main>
 
-      {workflow && workflow.status === "awaiting_selection" && (
-        <SelectionModal
-          key={workflow.current_agent}
-          workflow={workflow}
-          context={context}
-          onSelect={handleSelect}
-        />
-      )}
+      {workflow &&
+        workflow.status === "awaiting_selection" &&
+        ((workflow.current_agent === "flight" &&
+          (context.flight?.options?.length ?? 0) > 0) ||
+          (workflow.current_agent === "hotel" &&
+            (context.hotel?.options?.length ?? 0) > 0)) && (
+          <SelectionModal
+            key={workflow.current_agent}
+            workflow={workflow}
+            context={context}
+            onSelect={handleSelect}
+          />
+        )}
 
       {workflow && workflow.status === "awaiting_input" && (
         <InputModal
@@ -215,7 +220,7 @@ export function Dashboard() {
         />
       )}
 
-      {workflow && workflow.status === "awaiting_budget_review" && (
+      {workflow && workflow.status === "awaiting_budget_review" && context.budget && (
         <BudgetReviewModal
           workflow={workflow}
           context={context}
