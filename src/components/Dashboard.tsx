@@ -183,7 +183,11 @@ export function Dashboard() {
               style={{ marginTop: "32px", gridTemplateColumns: "1fr 1fr" }}
             >
               <ActivityFeed events={events} />
-              <SharedContextPanel context={context} />
+              <SharedContextPanel
+                context={context}
+                agentRuns={agentRuns}
+                workflowStatus={workflow.status}
+              />
             </div>
 
             <AgentMessages

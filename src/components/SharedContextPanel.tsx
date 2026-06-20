@@ -18,7 +18,7 @@ import {
   Bus,
   CloudSun,
 } from "lucide-react";
-import type { SharedContext } from "@/lib/types";
+import type { AgentRunRow, SharedContext, WorkflowStatus } from "@/lib/types";
 import { money } from "@/lib/format";
 
 type Highlight = "coral" | "gold" | "green" | "waiting" | undefined;
@@ -279,7 +279,15 @@ const AGENT_KEYS = [
 ];
 const TOTAL_STAGES = AGENT_KEYS.length; // 9
 
-export function SharedContextPanel({ context }: { context: SharedContext }) {
+export function SharedContextPanel({
+  context,
+  agentRuns = [],
+  workflowStatus,
+}: {
+  context: SharedContext;
+  agentRuns?: AgentRunRow[];
+  workflowStatus?: WorkflowStatus;
+}) {
   const [raw, setRaw] = useState(false);
   const [copied, setCopied] = useState(false);
   const sections = buildSections(context);
@@ -309,7 +317,21 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
     }
   }
 
-  const filled = AGENT_KEYS.filter((k) => context[k] != null).length;
+  // An agent counts as "done" if it left data in the shared context OR it has
+  // a finished run. Approval is a human gate (no run), so it's done once the
+  // approval has been resolved or the whole workflow has completed.
+  const ranAgents = new Set(
+    agentRuns
+      .filter((r) => r.status === "completed" || r.status === "skipped")
+      .map((r) => r.agent)
+  );
+  const completed = workflowStatus === "completed";
+  const filled = AGENT_KEYS.filter((k) => {
+    if (k === "approval") {
+      return completed || context.approval != null || workflowStatus === "awaiting_approval";
+    }
+    return context[k] != null || ranAgents.has(k as never) || completed;
+  }).length;
   const pct = Math.round((filled / TOTAL_STAGES) * 100);
 
   return (
