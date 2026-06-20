@@ -27,7 +27,7 @@ const PREF_EXAMPLES = [
   "Make it 7 days and add nightlife",
   "Raise the budget to ₹3,00,000",
   "Switch the destination to Bali",
-  "Make it a luxury trip for 4 people",
+  "Add more food experiences",
 ];
 
 export function ApprovalPanel({

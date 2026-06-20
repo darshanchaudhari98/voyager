@@ -4,10 +4,10 @@ import { useState } from "react";
 import { MessageSquarePlus, Wand2 } from "lucide-react";
 
 const EXAMPLES = [
-  "I prefer Emirates",
-  "Make the hotel luxury",
   "Make it 7 days and add nightlife",
   "Raise the budget to ₹3,00,000",
+  "Add more adventure activities",
+  "Switch the destination to Bali",
 ];
 
 /**
@@ -61,7 +61,7 @@ export function RefinePlanCard({
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
         rows={2}
-        placeholder="e.g. I prefer Emirates and a luxury hotel"
+        placeholder="e.g. Make it 7 days and add more food experiences"
         style={{
           width: "100%",
           resize: "none",
