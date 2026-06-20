@@ -265,7 +265,19 @@ function buildSections(ctx: SharedContext): Section[] {
   return sections;
 }
 
-const TOTAL_STAGES = 4; // request, flight, hotel, budget
+// The nine agents whose output populates the shared context.
+const AGENT_KEYS = [
+  "flight",
+  "hotel",
+  "activity",
+  "weather",
+  "transport",
+  "insights",
+  "budget",
+  "approval",
+  "itinerary",
+];
+const TOTAL_STAGES = AGENT_KEYS.length; // 9
 
 export function SharedContextPanel({ context }: { context: SharedContext }) {
   const [raw, setRaw] = useState(false);
@@ -297,9 +309,7 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
     }
   }
 
-  const filled = ["request", "flight", "hotel", "budget"].filter((k) =>
-    sections.some((s) => s.key === k)
-  ).length;
+  const filled = AGENT_KEYS.filter((k) => context[k] != null).length;
   const pct = Math.round((filled / TOTAL_STAGES) * 100);
 
   return (

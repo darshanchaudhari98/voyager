@@ -4,9 +4,9 @@ import { useState } from "react";
 import { Sparkles } from "lucide-react";
 
 const EXAMPLES = [
-  "Plan a 5-day trip to Japan for 2 people with a budget of ₹200,000",
-  "Plan a 7-day luxury trip to Dubai for 2 with budget ₹450,000",
-  "Plan a 4-day family beach holiday to Bali for 4 people, budget ₹300,000",
+  "Plan a 5-day trip to Japan for 2 people with a budget of ₹100,000",
+  "Plan a 7-day luxury trip to Dubai for 2 with budget ₹100,000",
+  "Plan a 4-day family beach holiday to Bali for 4 people, budget ₹100,000",
 ];
 
 export function NewWorkflowForm({
@@ -58,7 +58,7 @@ export function NewWorkflowForm({
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
         rows={3}
-        placeholder="Plan a 5-day trip to Japan for 2 people with a budget of ₹200,000"
+        placeholder="Plan a 5-day trip to Japan for 2 people with a budget of ₹100,000"
         style={{
           width: "100%",
           resize: "none",
