@@ -9,11 +9,11 @@ import { NewWorkflowForm } from "./NewWorkflowForm";
 import { TripSummary } from "./TripSummary";
 import { AgentCards } from "./AgentCards";
 import { ApprovalPanel } from "./ApprovalPanel";
-import { SelectionModal } from "./SelectionModal";
 import { InputModal } from "./InputModal";
-import { BudgetReviewModal } from "./BudgetReviewModal";
 import { ActivityFeed } from "./ActivityFeed";
+import { AgentMessages } from "./AgentMessages";
 import { SharedContextPanel } from "./SharedContextPanel";
+import { RefinePlanCard } from "./RefinePlanCard";
 import { ItineraryView } from "./ItineraryView";
 import { TripDownload } from "./TripDownload";
 import { Footer } from "./Footer";
@@ -50,19 +50,6 @@ export function Dashboard() {
     [workflowId, refresh]
   );
 
-  const handleSelect = useCallback(
-    async (optionId: string) => {
-      if (!workflowId) return;
-      await fetch("/api/commands", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workflowId, command: "select_option", optionId }),
-      });
-      await refresh(workflowId);
-    },
-    [workflowId, refresh]
-  );
-
   const handleProvideInput = useCallback(
     async (departDate: string, returnDate: string) => {
       if (!workflowId) return;
@@ -81,17 +68,33 @@ export function Dashboard() {
     [workflowId, refresh]
   );
 
-  const handleAcknowledgeBudget = useCallback(async () => {
-    if (!workflowId) return;
-    await fetch("/api/commands", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workflowId, command: "acknowledge_budget" }),
-    });
-    await refresh(workflowId);
-  }, [workflowId, refresh]);
+  const handleChangePreferences = useCallback(
+    async (prompt: string) => {
+      if (!workflowId || !prompt.trim()) return;
+      await fetch("/api/commands", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflowId, command: "change_preferences", prompt }),
+      });
+      await refresh(workflowId);
+    },
+    [workflowId, refresh]
+  );
 
-  const { workflow, context, events, agentRuns, approvals } = data;
+  const handleSelectOption = useCallback(
+    async (kind: "flight" | "hotel", optionId: string) => {
+      if (!workflowId) return;
+      await fetch("/api/commands", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflowId, command: "select_option", kind, optionId }),
+      });
+      await refresh(workflowId);
+    },
+    [workflowId, refresh]
+  );
+
+  const { workflow, context, events, agentRuns, approvals, agentMessages } = data;
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg-primary)" }}>
@@ -154,9 +157,10 @@ export function Dashboard() {
                 lineHeight: 1.5,
               }}
             >
-              Launch a plan above and approve each task as the Flight, Hotel,
-              Budget, Approval and Itinerary agents execute over a shared
-              context with live events.
+              Launch a plan above and the Flight, Hotel, Activity, Weather,
+              Transport and Insights agents run in parallel over a shared
+              context. The Budget Agent then negotiates directly with them to
+              optimize cost before presenting the plan for your approval.
             </p>
           </div>
         ) : (
@@ -171,6 +175,7 @@ export function Dashboard() {
               workflow={workflow}
               agentRuns={agentRuns}
               context={context}
+              onSelectOption={handleSelectOption}
             />
 
             <div
@@ -181,8 +186,17 @@ export function Dashboard() {
               <SharedContextPanel context={context} />
             </div>
 
+            <AgentMessages
+              messages={agentMessages}
+              currency={workflow.request?.currency ?? "INR"}
+            />
+
             {workflow.status === "completed" && (
               <TripDownload workflow={workflow} context={context} />
+            )}
+
+            {workflow.status === "completed" && (
+              <RefinePlanCard onSubmit={handleChangePreferences} />
             )}
 
             {context.itinerary && (
@@ -198,33 +212,11 @@ export function Dashboard() {
         <Footer workflow={workflow} />
       </main>
 
-      {workflow &&
-        workflow.status === "awaiting_selection" &&
-        ((workflow.current_agent === "flight" &&
-          (context.flight?.options?.length ?? 0) > 0) ||
-          (workflow.current_agent === "hotel" &&
-            (context.hotel?.options?.length ?? 0) > 0)) && (
-          <SelectionModal
-            key={workflow.current_agent}
-            workflow={workflow}
-            context={context}
-            onSelect={handleSelect}
-          />
-        )}
-
       {workflow && workflow.status === "awaiting_input" && (
         <InputModal
           workflow={workflow}
           context={context}
           onSubmit={handleProvideInput}
-        />
-      )}
-
-      {workflow && workflow.status === "awaiting_budget_review" && context.budget && (
-        <BudgetReviewModal
-          workflow={workflow}
-          context={context}
-          onContinue={handleAcknowledgeBudget}
         />
       )}
 
@@ -234,6 +226,7 @@ export function Dashboard() {
           approvals={approvals}
           context={context}
           onCommand={handleCommand}
+          onChangePreferences={handleChangePreferences}
         />
       )}
     </div>

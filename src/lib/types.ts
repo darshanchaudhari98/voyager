@@ -16,6 +16,10 @@ export type WorkflowStatus =
 export type AgentName =
   | "flight"
   | "hotel"
+  | "activity"
+  | "weather"
+  | "transport"
+  | "insights"
   | "budget"
   | "approval"
   | "itinerary";
@@ -27,6 +31,9 @@ export type EventType =
   | "agent_started"
   | "agent_completed"
   | "context_updated"
+  | "parallel_started"
+  | "parallel_completed"
+  | "message_sent"
   | "selection_required"
   | "selection_received"
   | "input_required"
@@ -37,6 +44,9 @@ export type EventType =
   | "workflow_completed"
   | "workflow_failed";
 
+// Direct agent-to-agent message channel (distinct from shared context).
+export type MessageType = "request" | "response" | "broadcast" | "info";
+
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 
 export type CommandType =
@@ -45,6 +55,7 @@ export type CommandType =
   | "provide_input"
   | "acknowledge_budget"
   | "auto_match_budget"
+  | "change_preferences"
   | "approve"
   | "reject"
   | "update_budget"
@@ -67,6 +78,7 @@ export interface TravelRequest {
   departDate: string; // ISO yyyy-mm-dd
   returnDate: string; // ISO yyyy-mm-dd
   preferences: string[];
+  preferredAirline?: string; // e.g. "Emirates" — honored by the Flight Agent
 }
 
 export type DataSource = "liteapi";
@@ -108,12 +120,58 @@ export interface HotelOption {
 export interface BudgetBreakdown {
   flightCost: number;
   hotelCost: number;
+  activityCost: number;
+  transportCost: number;
   miscCost: number;
+  onGroundCost: number; // activity + transport + misc (used to size the itinerary)
   totalCost: number;
   budget: number;
   overage: number;
   withinBudget: boolean;
   currency: string;
+}
+
+// --- Activity Agent ---------------------------------------------------------
+export interface ActivityItem {
+  id: string;
+  name: string;
+  category: string; // sightseeing | food | adventure | culture | relaxation | nightlife
+  cost: number; // total for the whole group
+  optional: boolean; // optional items can be dropped during negotiation
+  currency: string;
+}
+
+export interface ActivityPlan {
+  items: ActivityItem[];
+  totalCost: number;
+  droppedCount: number; // how many optional items negotiation has removed
+  currency: string;
+  generatedBy: string;
+}
+
+// --- Transport Agent --------------------------------------------------------
+export interface TransportOption {
+  id: string;
+  mode: string; // metro pass | car rental | private transfer | taxi | bus pass
+  description: string;
+  cost: number; // total for the trip
+  currency: string;
+}
+
+export interface TransportPlan {
+  selected: TransportOption;
+  options: TransportOption[];
+  generatedBy: string;
+}
+
+// --- Weather Agent ----------------------------------------------------------
+export interface WeatherForecast {
+  summary: string;
+  season: string;
+  tempRange: string; // e.g. "12–19°C"
+  conditions: string;
+  packing: string[];
+  generatedBy: string;
 }
 
 export interface ItineraryDay {
@@ -131,6 +189,16 @@ export interface Itinerary {
   generatedBy: string; // model identifier, e.g. "openai/gpt-4o-mini"
 }
 
+// Produced by the Insights Agent (runs in parallel with flight/hotel).
+export interface DestinationInsights {
+  bestAreas: string[];
+  gettingAround: string;
+  safety: string;
+  seasonalNote: string;
+  mustTry: string[];
+  generatedBy: string;
+}
+
 // ---------------------------------------------------------------------------
 // Shared context — the single document every agent reads/writes
 // ---------------------------------------------------------------------------
@@ -145,6 +213,17 @@ export interface SharedContext {
     options: HotelOption[];
   };
   budget?: BudgetBreakdown;
+  activity?: ActivityPlan;
+  transport?: TransportPlan;
+  weather?: WeatherForecast;
+  insights?: DestinationInsights;
+  negotiation?: {
+    triggered: boolean;
+    rounds: number;
+    savings: number;
+    summary: string;
+    applied: string[]; // which agents contributed savings, e.g. ["flight","activity"]
+  } | null;
   approval?: {
     required: boolean;
     resolution?: "approve" | "reject" | "update_budget";
@@ -202,8 +281,21 @@ export interface AgentRunRow {
   input: unknown;
   output: unknown;
   error: string | null;
+  parallel_group: string | null;
   started_at: string;
   finished_at: string | null;
+}
+
+export interface AgentMessageRow {
+  id: string;
+  workflow_id: string;
+  sender: AgentName;
+  recipient: AgentName | "all";
+  type: MessageType;
+  subject: string | null;
+  body: Record<string, unknown>;
+  in_reply_to: string | null;
+  created_at: string;
 }
 
 export interface ApprovalRow {

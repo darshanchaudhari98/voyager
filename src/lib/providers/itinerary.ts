@@ -40,7 +40,7 @@ Trip:
 Booked context:
 - Flight: ${flight ? `${flight.airline} (${flight.from}->${flight.to}), ${flight.currency} ${flight.totalPrice}` : "n/a"}
 - Hotel: ${hotel ? `${hotel.name}, ${hotel.currency} ${hotel.totalPrice} for ${hotel.nights} nights` : "n/a"}
-- Budget breakdown: flights ${budget?.flightCost}, hotel ${budget?.hotelCost}, misc ${budget?.miscCost}, total ${budget?.totalCost}
+- Budget breakdown: flights ${budget?.flightCost}, hotel ${budget?.hotelCost}, activities ${budget?.activityCost}, transport ${budget?.transportCost}, misc ${budget?.miscCost}, total ${budget?.totalCost}
 
 Return STRICT JSON only, no markdown, matching this shape:
 {
@@ -53,7 +53,7 @@ Return STRICT JSON only, no markdown, matching this shape:
 Make exactly ${req.days} day objects. Costs in ${req.currency}.
 IMPORTANT: each day's "estimatedCost" is the on-the-ground spend (activities,
 meals, local transport) for that day. The sum of all days' "estimatedCost" must
-equal the miscellaneous budget of ${req.currency} ${budget?.miscCost ?? "the remaining budget"}
+equal the on-ground budget of ${req.currency} ${budget?.onGroundCost ?? "the remaining budget"}
 (flights and hotel are already booked separately). Distribute that amount
 sensibly across the days.`;
 }
@@ -98,7 +98,7 @@ export async function generateItinerary(
 
   return {
     summary: parsed.summary ?? "",
-    days: normalizeDayCosts(parsed.days, ctx.budget?.miscCost),
+    days: normalizeDayCosts(parsed.days, ctx.budget?.onGroundCost ?? ctx.budget?.miscCost),
     tips: parsed.tips ?? [],
     generatedBy: model(),
   };

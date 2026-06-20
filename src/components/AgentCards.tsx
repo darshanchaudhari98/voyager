@@ -1,6 +1,17 @@
 "use client";
 
-import { Plane, Building, Calculator, ShieldCheck, Map } from "lucide-react";
+import { useState } from "react";
+import {
+  Plane,
+  Building,
+  Calculator,
+  ShieldCheck,
+  Map,
+  Compass,
+  Ticket,
+  CloudSun,
+  Bus,
+} from "lucide-react";
 import type {
   AgentName,
   AgentRunRow,
@@ -8,6 +19,7 @@ import type {
   WorkflowRow,
 } from "@/lib/types";
 import { money } from "@/lib/format";
+import { AgentDetailModal } from "./AgentDetailModal";
 
 type CardStatus = "running" | "completed" | "waiting" | "idle" | "failed";
 
@@ -42,9 +54,8 @@ function agentStatus(
   workflow: WorkflowRow | null,
   context: SharedContext
 ): CardStatus {
+  void context;
   const awaitingApproval = workflow?.status === "awaiting_approval";
-  const awaitingSelection = workflow?.status === "awaiting_selection";
-  const awaitingReview = workflow?.status === "awaiting_budget_review";
 
   if (agent === "approval") {
     if (awaitingApproval) return "waiting";
@@ -52,27 +63,7 @@ function agentStatus(
     return "idle";
   }
 
-  if (
-    (awaitingApproval || awaitingSelection || awaitingReview) &&
-    workflow?.current_agent === agent
-  ) {
-    // If a selection is pending but the live options haven't arrived yet,
-    // the agent is still fetching — keep it RUNNING until the data lands.
-    if (awaitingSelection) {
-      const loaded =
-        agent === "flight"
-          ? (context.flight?.options?.length ?? 0) > 0
-          : agent === "hotel"
-          ? (context.hotel?.options?.length ?? 0) > 0
-          : true;
-      if (!loaded) return "running";
-    }
-    return "waiting";
-  }
-
   // While the orchestrator is actively on this agent, keep showing RUNNING.
-  // This avoids a brief "COMPLETED" flash between an agent finishing its run
-  // and the workflow transitioning into the selection/review pause.
   if (workflow?.status === "running" && workflow?.current_agent === agent) {
     return "running";
   }
@@ -81,6 +72,7 @@ function agentStatus(
   if (!run) return "idle";
   if (run.status === "completed") return "completed";
   if (run.status === "failed") return "failed";
+  if (run.status === "skipped") return "idle";
   if (run.status === "running") return "running";
   return "idle";
 }
@@ -110,6 +102,42 @@ function metricsFor(
         {
           label: "Per Night",
           value: h ? money(h.selected.pricePerNight, cur) : "—",
+          highlight: true,
+        },
+      ];
+    }
+    case "insights": {
+      const i = ctx.insights;
+      return [
+        { label: "Areas", value: i ? String(i.bestAreas.length) : "—" },
+        { label: "Must-Try", value: i ? String(i.mustTry.length) : "—" },
+      ];
+    }
+    case "activity": {
+      const a = ctx.activity;
+      return [
+        { label: "Activities", value: a ? String(a.items.length) : "—" },
+        {
+          label: "Cost",
+          value: a ? money(a.totalCost, cur) : "—",
+          highlight: true,
+        },
+      ];
+    }
+    case "weather": {
+      const w = ctx.weather;
+      return [
+        { label: "Season", value: w?.season || "—" },
+        { label: "Temp", value: w?.tempRange || "—" },
+      ];
+    }
+    case "transport": {
+      const t = ctx.transport;
+      return [
+        { label: "Mode", value: t?.selected.mode ?? "—" },
+        {
+          label: "Cost",
+          value: t ? money(t.selected.cost, cur) : "—",
           highlight: true,
         },
       ];
@@ -163,6 +191,10 @@ function metricsFor(
 const AGENTS: { agent: AgentName; name: string; icon: React.ElementType }[] = [
   { agent: "flight", name: "Flight Agent", icon: Plane },
   { agent: "hotel", name: "Hotel Agent", icon: Building },
+  { agent: "activity", name: "Activity Agent", icon: Ticket },
+  { agent: "weather", name: "Weather Agent", icon: CloudSun },
+  { agent: "transport", name: "Transport Agent", icon: Bus },
+  { agent: "insights", name: "Insights Agent", icon: Compass },
   { agent: "budget", name: "Budget Agent", icon: Calculator },
   { agent: "approval", name: "Approval Agent", icon: ShieldCheck },
   { agent: "itinerary", name: "Itinerary Agent", icon: Map },
@@ -172,15 +204,24 @@ export function AgentCards({
   workflow,
   agentRuns,
   context,
+  onSelectOption,
 }: {
   workflow: WorkflowRow | null;
   agentRuns: AgentRunRow[];
   context: SharedContext;
+  onSelectOption: (kind: "flight" | "hotel", optionId: string) => Promise<void>;
 }) {
+  const [openAgent, setOpenAgent] = useState<AgentName | null>(null);
+  const currency = context.request?.currency ?? workflow?.request?.currency ?? "INR";
+
   return (
+    <>
     <div
       className="agent-cards-grid grid gap-4"
-      style={{ marginTop: "32px", gridTemplateColumns: "repeat(5, 1fr)" }}
+      style={{
+        marginTop: "32px",
+        gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+      }}
     >
       {AGENTS.map(({ agent, name, icon: Icon }) => {
         const st = agentStatus(agent, agentRuns, workflow, context);
@@ -191,12 +232,19 @@ export function AgentCards({
           <div
             key={agent}
             className="fade-in"
+            role="button"
+            tabIndex={0}
+            onClick={() => setOpenAgent(agent)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") setOpenAgent(agent);
+            }}
             style={{
               background: "var(--bg-card)",
               border: "1px solid var(--border-card)",
               borderRadius: "12px",
               padding: "24px",
               transition: "all 0.3s ease",
+              cursor: "pointer",
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.border = "1px solid rgba(255,255,255,0.12)";
@@ -286,9 +334,32 @@ export function AgentCards({
                 </div>
               ))}
             </div>
+
+            <p
+              className="font-mono-geist"
+              style={{
+                marginTop: "14px",
+                fontSize: "10px",
+                color: "var(--text-muted)",
+                textAlign: "center",
+              }}
+            >
+              click for details →
+            </p>
           </div>
         );
       })}
     </div>
+
+    {openAgent && (
+      <AgentDetailModal
+        agent={openAgent}
+        context={context}
+        currency={currency}
+        onClose={() => setOpenAgent(null)}
+        onSelectOption={onSelectOption}
+      />
+    )}
+    </>
   );
 }

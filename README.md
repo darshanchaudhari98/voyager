@@ -18,24 +18,68 @@ This is an *Agent Control Plane*, not a chatbot.
 ```
 prompt ─▶ parse ─▶ create workflow + shared_context
                          │
-   Flight Agent ─▶ [SELECT a flight]  ─▶  Hotel Agent ─▶ [SELECT a hotel]
-        │  (live LiteAPI options shown in a modal)            │
-        ▼                                                     ▼
-   Budget Agent ─▶ [APPROVE / modify budget] ─▶ Itinerary Agent ─▶ completed
+   ┌──────────── RESEARCH PHASE — all six planning agents in parallel ───────────┐
+   │  Flight ║ Hotel ║ Activity ║ Weather ║ Transport ║ Insights                  │
+   │  each autonomously finds & recommends its best option → shared context        │
+   └────────────────────────────────────┬──────────────────────────────────────────┘
+                                         ▼
+                                   Budget Agent  (combines plan, computes total)
+                                         │
+                                         ▼  if over budget
+        ┌──────── A2A NEGOTIATION (direct messages, up to 3 rounds) ────────┐
+        │ Budget ⇄ Flight     cheaper flight                                 │
+        │ Budget ⇄ Hotel      cheaper hotel                                  │
+        │ Budget ⇄ Activity   drop optional activities                      │
+        │ Budget ⇄ Transport  cheaper transport                            │
+        └────────────────────────────────┬────────────────────────────────────┘
+                                         ▼
+   AWAITING APPROVAL — optimized plan + total + reasoning shown to the operator,
+        who can: approve · reject · modify budget · change preferences (prompt)
+        │   changing preferences re-runs ONLY the affected agents, then re-optimizes
+        ▼  approve
+   Itinerary Agent ─▶ completed
         └──────── every agent reads/writes the shared context ─────────────┘
 ```
 
-Every task has a **human decision point**:
-- **Flight** and **Hotel** pause for an **interactive selection** — the agent
-  fetches live options and a modal shows them (airline, times, stops, price /
-  hotel photo, rating, board, price) for the operator to pick.
-- **Budget** and **Itinerary** pause for an **approval gate**. The budget gate
-  surfaces any overage and lets the operator approve, reject, or modify the
-  budget.
+All planning agents run **autonomously and automatically** before any human
+interaction. The control plane demonstrates:
 
-Every state change is recorded as an **event** (`agent_started`,
-`agent_completed`, `context_updated`, `approval_required`, `approval_received`,
-`workflow_completed`, `workflow_failed`) and streamed to the dashboard.
+1. **Parallel execution of independent agents.** Flight, Hotel, Activity,
+   Weather, Transport and Insights depend only on the parsed request, so the
+   orchestrator fans them out with `Promise.all` under a shared `parallel_group`
+   (`runResearchPhase` in `src/lib/orchestrator.ts`). Each agent independently
+   finds and recommends its best option.
+2. **Direct agent-to-agent (A2A) communication & negotiation.** When the trip is
+   over budget, the Budget Agent negotiates *directly* with the Flight, Hotel,
+   Activity and Transport agents over the `agent_messages` channel — they propose
+   cheaper flights/hotels/transport and trim optional activities, collaboratively
+   optimizing across up to 3 rounds before the human is involved
+   (`src/lib/agents/negotiation.ts`).
+3. **Human oversight.** A single approval gate presents the optimized plan, total
+   and reasoning. The operator can approve, reject, modify the budget, or
+   **change preferences with a prompt** — which re-runs only the affected agents
+   and automatically re-optimizes (`changePreferences` + `affectedAgents`).
+4. **Observability.** Every state change is an **event**, every execution is an
+   **agent run** (tagged with its parallel group), and every A2A message is
+   recorded — all streamed live to the dashboard via Supabase Realtime.
+
+### Agents
+| Agent      | Role                                          | Data source     |
+|------------|-----------------------------------------------|-----------------|
+| Flight     | Best round-trip flight                         | LiteAPI (live)  |
+| Hotel      | Best-rated stay within budget                  | LiteAPI (live)  |
+| Activity   | Recommended experiences (optional/trimmable)   | LLM             |
+| Weather    | Seasonal outlook + packing (informational)     | LLM             |
+| Transport  | Local transport option + cheaper alternatives  | LLM             |
+| Insights   | Destination insights (informational)           | LLM             |
+| Budget     | Combines the plan, computes total, negotiates  | deterministic   |
+| Approval   | Human-in-the-loop gate                          | —               |
+| Itinerary  | Day-by-day plan (after approval)               | LLM             |
+
+Event types: `workflow_started`, `agent_started`, `agent_completed`,
+`context_updated`, `parallel_started`, `parallel_completed`, `message_sent`,
+`input_required`, `input_received`, `approval_required`, `approval_received`,
+`workflow_completed`, `workflow_failed`.
 
 ### Tech stack
 - **Next.js 16** (App Router) + **TypeScript**
@@ -51,9 +95,14 @@ Every state change is recorded as an **event** (`agent_started`,
 |------------------|----------------------------------------------------|
 | `workflows`      | One row per planning run + status                  |
 | `shared_context` | Single evolving JSON document shared by all agents |
-| `agent_runs`     | Per-agent execution records (observability)        |
+| `agent_runs`     | Per-agent execution records + `parallel_group`     |
+| `agent_messages` | Direct agent-to-agent (A2A) message log            |
 | `events`         | Append-only event stream (live feed)               |
 | `approvals`      | Human-in-the-loop approval requests                |
+
+> If you created the database with an earlier version of the schema, re-run
+> [`supabase/schema.sql`](supabase/schema.sql) — it is idempotent and adds the
+> new `agent_messages` table and the `agent_runs.parallel_group` column.
 
 ---
 
@@ -98,7 +147,7 @@ Open http://localhost:3000.
 | GET    | `/api/workflows/[id]`          | Workflow + context + runs + approvals |
 | GET    | `/api/events/[workflowId]`     | Full event stream                     |
 
-**Commands:** `select_option`, `approve`, `reject`, `update_budget`, `restart_workflow`.
+**Commands:** `begin_workflow`, `provide_input` (new dates), `change_preferences` (`{ prompt }`), `approve`, `reject`, `update_budget`, `restart_workflow`.
 
 ---
 
@@ -114,12 +163,17 @@ Open http://localhost:3000.
 
 ---
 
-## How the human-in-the-loop works
-1. The Budget Agent computes flight + hotel + miscellaneous + total cost.
-2. The Approval Agent compares total vs budget.
-3. If **over budget**, it creates a pending `approval`, sets the workflow to
-   `awaiting_approval`, and emits `approval_required` — the dashboard shows the
-   approval panel in real time.
-4. The user can **Approve**, **Reject**, or **Increase Budget**.
-5. On resume, the Itinerary Agent runs and the workflow completes — all without
-   a page refresh.
+## How the autonomous flow + human oversight works
+1. All six planning agents run **in parallel** and each auto-selects its best
+   option — no human input required during planning.
+2. The Budget Agent combines the plan and computes the total cost.
+3. If **over budget**, it opens an **A2A negotiation**: it messages the Flight,
+   Hotel, Activity and Transport agents directly, they propose cheaper options /
+   trim optional activities, and the plan is re-costed over up to 3 rounds.
+4. The optimized plan, total and reasoning are presented at a single
+   `awaiting_approval` gate. The user can **Approve**, **Reject**, **Modify
+   budget**, or **Change preferences** with a prompt.
+5. Changing preferences re-parses the request and re-runs **only the affected
+   agents**, then re-optimizes automatically.
+6. On approval, the Itinerary Agent generates the day-by-day plan and the
+   workflow completes — all live, without a page refresh.

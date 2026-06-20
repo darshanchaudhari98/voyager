@@ -4,6 +4,7 @@ import {
   startAgentRun,
   updateWorkflow,
 } from "../store";
+import { money } from "../format";
 import type { BudgetBreakdown, SharedContext, TravelRequest } from "../types";
 
 /**
@@ -24,22 +25,30 @@ export async function runBudgetAgent(
   try {
     const flightCost = ctx.flight?.selected.totalPrice ?? 0;
     const hotelCost = ctx.hotel?.selected.totalPrice ?? 0;
+    const activityCost = ctx.activity?.totalCost ?? 0;
+    const transportCost = ctx.transport?.selected.cost ?? 0;
 
-    // Miscellaneous = food, local transport, activities, buffer.
-    // Estimate per traveler per day plus a 10% contingency on travel+stay.
-    const perDayPerPerson = Math.round((req.budget * 0.04) / req.days);
-    const activities = perDayPerPerson * req.days * req.travelers;
+    // Miscellaneous = food, incidentals and a contingency buffer. Activities and
+    // local transport now have their own dedicated agents/lines, so misc only
+    // covers food/incidentals (~4% of budget per person per day) plus a 10%
+    // contingency on the committed travel + stay.
+    const perDayPerPerson = Math.round((req.budget * 0.025) / req.days);
+    const foodIncidentals = perDayPerPerson * req.days * req.travelers;
     const contingency = Math.round((flightCost + hotelCost) * 0.1);
-    const miscCost = activities + contingency;
+    const miscCost = foodIncidentals + contingency;
 
-    const totalCost = flightCost + hotelCost + miscCost;
+    const onGroundCost = activityCost + transportCost + miscCost;
+    const totalCost = flightCost + hotelCost + onGroundCost;
     const budget = effectiveBudget ?? req.budget;
     const overage = Math.max(0, totalCost - budget);
 
     const breakdown: BudgetBreakdown = {
       flightCost,
       hotelCost,
+      activityCost,
+      transportCost,
       miscCost,
+      onGroundCost,
       totalCost,
       budget,
       overage,
@@ -52,7 +61,7 @@ export async function runBudgetAgent(
       { budget: breakdown },
       {
         agent: "budget",
-        message: `Total ${req.currency} ${totalCost} vs budget ${req.currency} ${budget} (${
+        message: `Total ${money(totalCost, req.currency)} vs budget ${money(budget, req.currency)} (${
           breakdown.withinBudget ? "within" : "over"
         })`,
       }

@@ -8,10 +8,9 @@ import {
 import {
   resumeWorkflow,
   runWorkflow,
-  submitSelection,
   provideInput,
-  acknowledgeBudget,
-  autoMatchBudget,
+  changePreferences,
+  overrideSelection,
 } from "@/lib/orchestrator";
 import type { CommandType } from "@/lib/types";
 
@@ -20,10 +19,9 @@ export const maxDuration = 60;
 
 const VALID: CommandType[] = [
   "begin_workflow",
-  "select_option",
   "provide_input",
-  "acknowledge_budget",
-  "auto_match_budget",
+  "change_preferences",
+  "select_option",
   "approve",
   "reject",
   "update_budget",
@@ -76,9 +74,11 @@ export async function POST(req: NextRequest) {
     const workflowId = (body?.workflowId ?? "").toString();
     const command = body?.command as CommandType;
     const newBudget = body?.newBudget ? Number(body.newBudget) : undefined;
-    const optionId = body?.optionId ? String(body.optionId) : undefined;
     const departDate = body?.departDate ? String(body.departDate) : undefined;
     const returnDate = body?.returnDate ? String(body.returnDate) : undefined;
+    const changePrompt = body?.prompt ? String(body.prompt) : undefined;
+    const optionId = body?.optionId ? String(body.optionId) : undefined;
+    const selectKind = body?.kind === "hotel" ? "hotel" : "flight";
 
     if (!workflowId || !command || !VALID.includes(command)) {
       return NextResponse.json(
@@ -97,16 +97,6 @@ export async function POST(req: NextRequest) {
         await runWorkflow(workflowId);
         break;
       }
-      case "select_option": {
-        if (!optionId) {
-          return NextResponse.json(
-            { error: "select_option requires an 'optionId'" },
-            { status: 400 }
-          );
-        }
-        await submitSelection(workflowId, optionId);
-        break;
-      }
       case "provide_input": {
         if (!departDate || !returnDate) {
           return NextResponse.json(
@@ -117,19 +107,24 @@ export async function POST(req: NextRequest) {
         await provideInput(workflowId, { departDate, returnDate });
         break;
       }
-      case "acknowledge_budget": {
-        await acknowledgeBudget(workflowId);
-        break;
-      }
-      case "auto_match_budget": {
-        if (!newBudget || newBudget <= 0) {
+      case "change_preferences": {
+        if (!changePrompt) {
           return NextResponse.json(
-            { error: "auto_match_budget requires a positive 'newBudget'" },
+            { error: "change_preferences requires a 'prompt'" },
             { status: 400 }
           );
         }
-        await resolveApproval(workflowId, "update_budget", newBudget);
-        await autoMatchBudget(workflowId, newBudget);
+        await changePreferences(workflowId, changePrompt);
+        break;
+      }
+      case "select_option": {
+        if (!optionId) {
+          return NextResponse.json(
+            { error: "select_option requires an 'optionId'" },
+            { status: 400 }
+          );
+        }
+        await overrideSelection(workflowId, selectKind, optionId);
         break;
       }
       case "approve": {

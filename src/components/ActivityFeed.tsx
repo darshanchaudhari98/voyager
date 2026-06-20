@@ -13,6 +13,9 @@ import {
   MousePointerClick,
   CalendarClock,
   Calculator,
+  Split,
+  Merge,
+  Send,
 } from "lucide-react";
 import type { EventRow, EventType } from "@/lib/types";
 import { clockTime } from "@/lib/format";
@@ -22,6 +25,9 @@ const STYLE: Record<EventType, { color: string; icon: React.ElementType }> = {
   agent_started: { color: "var(--accent-blue)", icon: Play },
   agent_completed: { color: "var(--accent-green)", icon: CheckCircle },
   context_updated: { color: "var(--accent-gold)", icon: FileText },
+  parallel_started: { color: "var(--accent-blue)", icon: Split },
+  parallel_completed: { color: "var(--accent-green)", icon: Merge },
+  message_sent: { color: "var(--accent-coral)", icon: Send },
   selection_required: { color: "var(--accent-gold)", icon: ListChecks },
   selection_received: { color: "var(--accent-green)", icon: MousePointerClick },
   input_required: { color: "var(--accent-coral)", icon: CalendarClock },
@@ -49,7 +55,7 @@ export function ActivityFeed({ events }: { events: EventRow[] }) {
         border: "1px solid var(--border-card)",
         borderRadius: "12px",
         padding: "24px",
-        height: "540px",
+        height: "600px",
         display: "flex",
         flexDirection: "column",
       }}

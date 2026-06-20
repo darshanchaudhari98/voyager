@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type {
+  AgentMessageRow,
   AgentRunRow,
   ApprovalRow,
   EventRow,
@@ -15,6 +16,7 @@ export interface WorkflowData {
   events: EventRow[];
   agentRuns: AgentRunRow[];
   approvals: ApprovalRow[];
+  agentMessages: AgentMessageRow[];
   context: SharedContext;
 }
 
@@ -23,6 +25,7 @@ const EMPTY: WorkflowData = {
   events: [],
   agentRuns: [],
   approvals: [],
+  agentMessages: [],
   context: {},
 };
 
@@ -47,6 +50,7 @@ export function useWorkflow(workflowId: string | null) {
       context: json.context ?? {},
       agentRuns: json.agentRuns ?? [],
       approvals: json.approvals ?? [],
+      agentMessages: json.agentMessages ?? [],
       events: evJson.events ?? [],
     });
   }, []);
@@ -84,6 +88,17 @@ export function useWorkflow(workflowId: string | null) {
         "postgres_changes",
         { event: "*", schema: "public", table: "agent_runs", filter },
         () => refresh(workflowId)
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "agent_messages", filter },
+        (payload) => {
+          setData((prev) => {
+            const row = payload.new as AgentMessageRow;
+            if (prev.agentMessages.some((m) => m.id === row.id)) return prev;
+            return { ...prev, agentMessages: [...prev.agentMessages, row] };
+          });
+        }
       )
       .on(
         "postgres_changes",

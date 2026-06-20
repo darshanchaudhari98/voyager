@@ -12,6 +12,11 @@ import {
   Check,
   Database,
   Star,
+  Compass,
+  Handshake,
+  Ticket,
+  Bus,
+  CloudSun,
 } from "lucide-react";
 import type { SharedContext } from "@/lib/types";
 import { money } from "@/lib/format";
@@ -63,6 +68,9 @@ function buildSections(ctx: SharedContext): Section[] {
           label: "preferences",
           value: r.preferences.length ? r.preferences.join(", ") : "general",
         },
+        ...(r.preferredAirline
+          ? [{ label: "preferred_airline", value: r.preferredAirline, highlight: "coral" as Highlight }]
+          : []),
       ],
     });
   }
@@ -118,6 +126,8 @@ function buildSections(ctx: SharedContext): Section[] {
       rows: [
         { label: "flight_cost", value: money(b.flightCost, cur) },
         { label: "hotel_cost", value: money(b.hotelCost, cur) },
+        { label: "activity_cost", value: money(b.activityCost, cur) },
+        { label: "transport_cost", value: money(b.transportCost, cur) },
         { label: "misc_cost", value: money(b.miscCost, cur) },
         { label: "budget", value: money(b.budget, cur), highlight: "gold" },
         {
@@ -130,6 +140,103 @@ function buildSections(ctx: SharedContext): Section[] {
           value: b.withinBudget ? "within budget" : `over by ${money(b.overage, cur)}`,
           highlight: b.withinBudget ? "green" : "coral",
         },
+      ],
+    });
+  }
+
+  if (ctx.activity) {
+    const a = ctx.activity;
+    sections.push({
+      key: "activity",
+      title: "Activities",
+      icon: Ticket,
+      color: "var(--accent-coral)",
+      summary: `${a.items.length} · ${money(a.totalCost, cur)}`,
+      rows: [
+        ...a.items.map((it) => ({
+          label: it.optional ? `${it.name} (opt)` : it.name,
+          value: money(it.cost, cur),
+        })),
+        { label: "total", value: money(a.totalCost, cur), highlight: "gold" as Highlight },
+        ...(a.droppedCount
+          ? [{ label: "dropped", value: `${a.droppedCount} optional`, highlight: "coral" as Highlight }]
+          : []),
+      ],
+    });
+  }
+
+  if (ctx.transport) {
+    const t = ctx.transport.selected;
+    sections.push({
+      key: "transport",
+      title: "Transport",
+      icon: Bus,
+      color: "var(--accent-green)",
+      summary: t.mode,
+      rows: [
+        { label: "mode", value: t.mode },
+        { label: "details", value: t.description || "—" },
+        { label: "options", value: `${ctx.transport.options.length} found` },
+        { label: "cost", value: money(t.cost, cur), highlight: "gold" },
+      ],
+    });
+  }
+
+  if (ctx.weather) {
+    const w = ctx.weather;
+    sections.push({
+      key: "weather",
+      title: "Weather",
+      icon: CloudSun,
+      color: "var(--status-waiting)",
+      summary: `${w.season} · ${w.tempRange}`,
+      rows: [
+        { label: "season", value: w.season || "—" },
+        { label: "temp_range", value: w.tempRange || "—" },
+        { label: "conditions", value: w.conditions || "—" },
+        { label: "packing", value: w.packing.join(", ") || "—" },
+      ],
+    });
+  }
+
+  if (ctx.insights) {
+    const i = ctx.insights;
+    sections.push({
+      key: "insights",
+      title: "Insights",
+      icon: Compass,
+      color: "var(--accent-blue)",
+      summary: `${i.bestAreas.length} areas`,
+      rows: [
+        { label: "best_areas", value: i.bestAreas.join(", ") || "—" },
+        { label: "getting_around", value: i.gettingAround || "—" },
+        { label: "safety", value: i.safety || "—" },
+        { label: "season", value: i.seasonalNote || "—" },
+        { label: "must_try", value: i.mustTry.join(", ") || "—" },
+      ],
+    });
+  }
+
+  if (ctx.negotiation?.triggered) {
+    const n = ctx.negotiation;
+    sections.push({
+      key: "negotiation",
+      title: "Negotiation (A2A)",
+      icon: Handshake,
+      color: "var(--accent-coral)",
+      summary: n.savings > 0 ? `saved ${money(n.savings, cur)}` : "no change",
+      rows: [
+        { label: "rounds", value: String(n.rounds) },
+        {
+          label: "swapped",
+          value: n.applied.length ? n.applied.join(", ") : "none",
+        },
+        {
+          label: "savings",
+          value: money(n.savings, cur),
+          highlight: n.savings > 0 ? "green" : undefined,
+        },
+        { label: "summary", value: n.summary },
       ],
     });
   }
@@ -202,7 +309,7 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
         border: "1px solid var(--border-card)",
         borderRadius: "12px",
         padding: "24px",
-        height: "540px",
+        height: "600px",
         display: "flex",
         flexDirection: "column",
       }}
@@ -263,10 +370,10 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
       {synced && !raw && (
         <div className="mb-4" style={{ flexShrink: 0 }}>
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="font-mono-geist" style={{ fontSize: "10px", color: "var(--text-muted)" }}>
+            <span className="font-mono-geist" style={{ fontSize: "11px", color: "var(--text-muted)" }}>
               CONTEXT POPULATED
             </span>
-            <span className="font-mono-geist" style={{ fontSize: "10px", color: "var(--text-secondary)" }}>
+            <span className="font-mono-geist" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
               {filled}/{TOTAL_STAGES} agents
             </span>
           </div>
@@ -300,8 +407,9 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
             wordBreak: "break-word",
             background: "rgba(0,0,0,0.4)",
             borderRadius: "8px",
-            padding: "12px",
-            fontSize: "11px",
+            padding: "14px",
+            fontSize: "12.5px",
+            lineHeight: 1.6,
             color: "var(--text-secondary)",
             flex: "1 1 auto",
             minHeight: 0,
@@ -354,15 +462,15 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
                   >
                     <Icon size={15} style={{ color: s.color }} />
                   </span>
-                  <span style={{ fontSize: "13px", fontWeight: 500, color: "var(--text-primary)" }}>
+                  <span style={{ fontSize: "15px", fontWeight: 600, color: "var(--text-primary)" }}>
                     {s.title}
                   </span>
                   <span
                     className="font-mono-geist ml-auto"
                     style={{
-                      fontSize: "11px",
-                      color: "var(--text-muted)",
-                      maxWidth: "120px",
+                      fontSize: "12.5px",
+                      color: "var(--text-secondary)",
+                      maxWidth: "140px",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -387,33 +495,33 @@ export function SharedContextPanel({ context }: { context: SharedContext }) {
                     <div
                       style={{
                         borderTop: "1px solid var(--border-divider)",
-                        paddingTop: "8px",
+                        paddingTop: "10px",
                         display: "grid",
-                        gridTemplateColumns: "auto 1fr",
-                        gap: "6px 16px",
+                        gridTemplateColumns: "minmax(96px, auto) 1fr",
+                        gap: "9px 18px",
                       }}
                     >
                       {s.rows.map((row) => (
                         <div key={row.label} style={{ display: "contents" }}>
                           <span
                             className="font-mono-geist flex items-center gap-1.5"
-                            style={{ fontSize: "11px", color: "var(--text-secondary)" }}
+                            style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.45 }}
                           >
                             {row.label === "rating" && (
-                              <Star size={10} style={{ color: "var(--accent-gold)" }} />
+                              <Star size={12} style={{ color: "var(--accent-gold)" }} />
                             )}
                             {row.label}
                           </span>
                           <span
-                            className="font-mono-geist"
                             style={{
-                              fontSize: "11px",
+                              fontSize: "13px",
                               color: row.highlight
                                 ? highlightColors[row.highlight]
                                 : "var(--text-primary)",
                               textAlign: "right",
-                              fontWeight: row.highlight ? 600 : 400,
+                              fontWeight: row.highlight ? 600 : 500,
                               wordBreak: "break-word",
+                              lineHeight: 1.45,
                             }}
                           >
                             {row.value}

@@ -1,8 +1,10 @@
 import { getServiceClient } from "./supabase/server";
 import type {
+  AgentMessageRow,
   AgentName,
   AgentRunStatus,
   EventType,
+  MessageType,
   SharedContext,
   TravelRequest,
   WorkflowRow,
@@ -152,20 +154,32 @@ export async function emitEvent(
 export async function startAgentRun(
   workflowId: string,
   agent: AgentName,
-  input: unknown
+  input: unknown,
+  opts: { parallelGroup?: string; setCurrent?: boolean } = {}
 ): Promise<string> {
   const db = getServiceClient();
   const { data, error } = await db
     .from("agent_runs")
-    .insert({ workflow_id: workflowId, agent, status: "running", input })
+    .insert({
+      workflow_id: workflowId,
+      agent,
+      status: "running",
+      input,
+      parallel_group: opts.parallelGroup ?? null,
+    })
     .select("id")
     .single();
   if (error) throw new Error(`startAgentRun: ${error.message}`);
 
-  await updateWorkflow(workflowId, { current_agent: agent, status: "running" });
+  // During a parallel fan-out we don't want each agent stomping on
+  // `current_agent`; the orchestrator manages workflow status for the group.
+  if (opts.setCurrent !== false) {
+    await updateWorkflow(workflowId, { current_agent: agent, status: "running" });
+  }
   await emitEvent(workflowId, "agent_started", {
     agent,
     message: `${agent} agent started`,
+    payload: opts.parallelGroup ? { parallelGroup: opts.parallelGroup } : {},
   });
   return data.id as string;
 }
@@ -195,4 +209,58 @@ export async function finishAgentRun(
     message: `${agent} agent ${status}`,
     payload: { status },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Agent-to-agent (A2A) messaging — a DIRECT, addressed communication channel
+// between agents, separate from the shared context. Used for negotiation
+// (e.g. Budget asking Flight/Hotel for cheaper options) and fully observable.
+// ---------------------------------------------------------------------------
+export async function sendAgentMessage(
+  workflowId: string,
+  msg: {
+    sender: AgentName;
+    recipient: AgentName | "all";
+    type: MessageType;
+    subject?: string;
+    body?: Record<string, unknown>;
+    inReplyTo?: string;
+  }
+): Promise<string> {
+  const db = getServiceClient();
+  const { data, error } = await db
+    .from("agent_messages")
+    .insert({
+      workflow_id: workflowId,
+      sender: msg.sender,
+      recipient: msg.recipient,
+      type: msg.type,
+      subject: msg.subject ?? null,
+      body: msg.body ?? {},
+      in_reply_to: msg.inReplyTo ?? null,
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(`sendAgentMessage: ${error.message}`);
+
+  // Surface the exchange on the live event feed too.
+  await emitEvent(workflowId, "message_sent", {
+    agent: msg.sender,
+    message: `${msg.sender} → ${msg.recipient}: ${msg.subject ?? msg.type}`,
+    payload: { recipient: msg.recipient, type: msg.type, subject: msg.subject },
+  });
+  return data.id as string;
+}
+
+export async function getAgentMessages(
+  workflowId: string
+): Promise<AgentMessageRow[]> {
+  const db = getServiceClient();
+  const { data, error } = await db
+    .from("agent_messages")
+    .select()
+    .eq("workflow_id", workflowId)
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`getAgentMessages: ${error.message}`);
+  return (data as AgentMessageRow[]) ?? [];
 }

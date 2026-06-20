@@ -4,6 +4,10 @@ import {
   LayoutDashboard,
   Plane,
   Building,
+  Ticket,
+  CloudSun,
+  Bus,
+  Compass,
   Calculator,
   ShieldCheck,
   Map,
@@ -13,6 +17,10 @@ import type { AgentName, AgentRunRow, WorkflowRow } from "@/lib/types";
 const AGENT_NAV: { icon: React.ElementType; label: string; agent: AgentName }[] = [
   { icon: Plane, label: "Flight Agent", agent: "flight" },
   { icon: Building, label: "Hotel Agent", agent: "hotel" },
+  { icon: Ticket, label: "Activity Agent", agent: "activity" },
+  { icon: CloudSun, label: "Weather Agent", agent: "weather" },
+  { icon: Bus, label: "Transport Agent", agent: "transport" },
+  { icon: Compass, label: "Insights Agent", agent: "insights" },
   { icon: Calculator, label: "Budget Agent", agent: "budget" },
   { icon: ShieldCheck, label: "Approval Agent", agent: "approval" },
   { icon: Map, label: "Itinerary Agent", agent: "itinerary" },
@@ -25,12 +33,6 @@ function dotColor(
 ): string | null {
   if (agent === "approval") {
     return workflow?.status === "awaiting_approval" ? "var(--status-waiting)" : null;
-  }
-  if (
-    workflow?.status === "awaiting_selection" &&
-    workflow?.current_agent === agent
-  ) {
-    return "var(--accent-gold)";
   }
   const run = [...runs].reverse().find((r) => r.agent === agent);
   if (!run) return null;

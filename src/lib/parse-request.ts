@@ -122,6 +122,42 @@ function detectPreferences(prompt: string): string[] {
   return prefs;
 }
 
+// Common carriers we can recognise from a free-text preference like
+// "I prefer Emirates". The Flight Agent restricts to the matching airline.
+const AIRLINES = [
+  "Emirates",
+  "Qatar Airways",
+  "Etihad",
+  "Air India",
+  "IndiGo",
+  "Vistara",
+  "Lufthansa",
+  "Singapore Airlines",
+  "British Airways",
+  "Qantas",
+  "Turkish Airlines",
+  "Cathay Pacific",
+  "Thai Airways",
+  "Air France",
+  "KLM",
+  "Japan Airlines",
+  "ANA",
+  "Delta",
+  "United",
+  "American Airlines",
+];
+
+function detectAirline(prompt: string): string | undefined {
+  const lower = prompt.toLowerCase();
+  for (const a of AIRLINES) {
+    // match the airline name or its first word (e.g. "qatar", "singapore")
+    if (lower.includes(a.toLowerCase()) || lower.includes(a.split(" ")[0].toLowerCase())) {
+      return a;
+    }
+  }
+  return undefined;
+}
+
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -139,6 +175,7 @@ interface ExtractedFields {
   budget?: number;
   currency?: string;
   preferences?: string[];
+  preferredAirline?: string;
 }
 
 async function extractWithLLM(prompt: string): Promise<ExtractedFields | null> {
@@ -178,7 +215,8 @@ async function extractWithLLM(prompt: string): Promise<ExtractedFields | null> {
   "travelers": number,           // number of people (default 2)
   "budget": number,              // total budget as a plain number, no symbols (default 200000)
   "currency": string,            // ISO currency code; ₹=INR, $=USD, €=EUR, £=GBP (default INR)
-  "preferences": string[]        // lowercase keywords: luxury, budget, family, food, culture, beach, adventure, nightlife, relaxation
+  "preferences": string[],       // lowercase keywords: luxury, budget, family, food, culture, beach, adventure, nightlife, relaxation
+  "preferredAirline": string     // a specific airline the user asked for (e.g. "Emirates"), else ""
 }
 If the prompt names a country (e.g. "Japan"), choose that country's most popular tourist city as destinationCity (e.g. Tokyo) with its IATA code.
 Prompt: "${prompt.replace(/"/g, "'")}"`,
@@ -247,6 +285,9 @@ export async function parseTravelRequest(prompt: string): Promise<TravelRequest>
       ? llm!.preferences!.map((p) => String(p).toLowerCase())
       : base.preferences;
 
+  const preferredAirline =
+    str(llm?.preferredAirline, "") || detectAirline(prompt) || undefined;
+
   const depart = new Date();
   depart.setDate(depart.getDate() + 30);
   const ret = new Date(depart);
@@ -266,5 +307,156 @@ export async function parseTravelRequest(prompt: string): Promise<TravelRequest>
     departDate: isoDate(depart),
     returnDate: isoDate(ret),
     preferences,
+    preferredAirline,
+  };
+}
+
+// =============================================================================
+// Preference change: merge a free-text modification into an existing request.
+// Used by the "change_preferences" command so the operator can tweak the trip
+// after seeing the optimized plan (e.g. "make it 7 days and add nightlife",
+// "switch the destination to Bali", "raise the budget to 3 lakh").
+// =============================================================================
+export async function parsePreferenceChange(
+  current: TravelRequest,
+  modification: string
+): Promise<TravelRequest> {
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  // LLM path: ask the model to apply the change to the current request.
+  if (apiKey) {
+    try {
+      const client = new OpenAI({
+        apiKey,
+        baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+        defaultHeaders: {
+          "HTTP-Referer": "https://ai-travel-control-plane.vercel.app",
+          "X-Title": "AI Travel Agent Control Plane",
+        },
+      });
+      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+      const completion = await client.chat.completions.create({
+        model,
+        response_format: { type: "json_object" },
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You update an existing travel request based on a change instruction. Only change the fields the instruction implies; keep everything else identical. Respond with valid JSON only.",
+          },
+          {
+            role: "user",
+            content: `Current request JSON:
+${JSON.stringify(current)}
+
+Change instruction: "${modification.replace(/"/g, "'")}"
+
+Return the FULL updated request as STRICT JSON with exactly these keys:
+{
+  "originCity": string, "originCode": string,
+  "destinationCity": string, "destinationCountry": string, "destinationCode": string, "destinationLabel": string,
+  "days": number, "travelers": number, "budget": number, "currency": string,
+  "preferences": string[], "preferredAirline": string
+}
+If the destination changes, update destinationCity/Country/Code/Label and use real IATA codes.
+If the user names an airline (e.g. "I prefer Emirates"), set preferredAirline to it; otherwise keep the existing one.`,
+          },
+        ],
+      });
+      const raw = completion.choices[0]?.message?.content;
+      if (raw) {
+        const llm = JSON.parse(raw) as ExtractedFields;
+        return applyExtracted(current, llm);
+      }
+    } catch (err) {
+      console.error("[parse] preference-change LLM failed, using heuristics:", err);
+    }
+  }
+
+  // Heuristic fallback: overlay anything we can detect from the instruction.
+  const dest = detectDestination(modification);
+  const detectedPrefs = detectPreferences(modification);
+  const overlay: ExtractedFields = {
+    days: /\bday|night/i.test(modification) ? detectDays(modification) : undefined,
+    travelers: /\b(people|persons?|travel|pax|adult|guest|couple|solo)/i.test(modification)
+      ? detectTravelers(modification)
+      : undefined,
+    budget: /\d/.test(modification) && /(budget|₹|\$|€|£|lakh|lac)/i.test(modification)
+      ? detectBudget(modification)
+      : undefined,
+    // Merge any newly mentioned preferences with the existing ones.
+    preferences: detectedPrefs.length
+      ? Array.from(new Set([...current.preferences, ...detectedPrefs]))
+      : undefined,
+    preferredAirline: detectAirline(modification),
+    destinationCity: dest?.city,
+    destinationCountry: dest?.country,
+    destinationCode: dest?.code,
+    destinationLabel: dest?.label,
+  };
+  return applyExtracted(current, overlay);
+}
+
+/** Overlay extracted fields onto a request, recomputing dependent dates. */
+function applyExtracted(
+  current: TravelRequest,
+  llm: ExtractedFields
+): TravelRequest {
+  const num = (v: unknown, fallback: number) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback;
+  const str = (v: unknown, fallback: string) =>
+    typeof v === "string" && v.trim() ? v.trim() : fallback;
+
+  const destinationCity = str(llm.destinationCity, current.destinationCity);
+  const destinationCountry = str(llm.destinationCountry, current.destinationCountry)
+    .toUpperCase()
+    .slice(0, 2);
+  const destinationCode = str(llm.destinationCode, current.destinationCode)
+    .toUpperCase()
+    .slice(0, 3);
+  const destinationLabel = str(llm.destinationLabel, current.destination);
+
+  const days = num(llm.days, current.days);
+  const travelers = num(llm.travelers, current.travelers);
+  const budget = num(llm.budget, current.budget);
+  const currency = str(llm.currency, current.currency).toUpperCase();
+  const originCity = str(llm.originCity, current.origin);
+  const originCode = str(llm.originCode, current.originCode).toUpperCase().slice(0, 3);
+  const preferences =
+    Array.isArray(llm.preferences) && llm.preferences.length
+      ? llm.preferences.map((p) => String(p).toLowerCase())
+      : current.preferences;
+
+  const preferredAirline =
+    str(llm.preferredAirline, current.preferredAirline ?? "") || undefined;
+
+  // If the trip length changed, recompute the return date off the existing
+  // departure date; otherwise keep the dates as they were.
+  let departDate = current.departDate;
+  let returnDate = current.returnDate;
+  if (days !== current.days) {
+    const depart = new Date(current.departDate);
+    const ret = new Date(depart);
+    ret.setDate(ret.getDate() + days);
+    departDate = isoDate(depart);
+    returnDate = isoDate(ret);
+  }
+
+  return {
+    origin: originCity,
+    originCode,
+    destination: destinationLabel,
+    destinationCode,
+    destinationCity,
+    destinationCountry,
+    days,
+    travelers,
+    budget,
+    currency,
+    departDate,
+    returnDate,
+    preferences,
+    preferredAirline,
   };
 }

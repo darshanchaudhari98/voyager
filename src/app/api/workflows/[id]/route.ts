@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/supabase/server";
-import { getContext, getWorkflow } from "@/lib/store";
+import { getAgentMessages, getContext, getWorkflow } from "@/lib/store";
 
 export const runtime = "nodejs";
 
 // GET /api/workflows/[id]
-// Returns the workflow, its shared context, agent runs and approvals.
+// Returns the workflow, its shared context, agent runs, approvals and the
+// agent-to-agent message log.
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -18,7 +19,7 @@ export async function GET(
     }
 
     const db = getServiceClient();
-    const [context, runs, approvals] = await Promise.all([
+    const [context, runs, approvals, agentMessages] = await Promise.all([
       getContext(id),
       db
         .from("agent_runs")
@@ -30,6 +31,7 @@ export async function GET(
         .select()
         .eq("workflow_id", id)
         .order("created_at", { ascending: false }),
+      getAgentMessages(id),
     ]);
 
     return NextResponse.json({
@@ -37,6 +39,7 @@ export async function GET(
       context,
       agentRuns: runs.data ?? [],
       approvals: approvals.data ?? [],
+      agentMessages,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";

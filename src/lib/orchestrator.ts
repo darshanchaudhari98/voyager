@@ -1,7 +1,13 @@
 import { runBudgetAgent } from "./agents/budget-agent";
 import { runFlightAgent } from "./agents/flight-agent";
 import { runHotelAgent } from "./agents/hotel-agent";
+import { runActivityAgent } from "./agents/activity-agent";
+import { runTransportAgent } from "./agents/transport-agent";
+import { runWeatherAgent } from "./agents/weather-agent";
+import { runInsightsAgent } from "./agents/insights-agent";
 import { runItineraryAgent } from "./agents/itinerary-agent";
+import { runBudgetNegotiation } from "./agents/negotiation";
+import { parsePreferenceChange } from "./parse-request";
 import { getServiceClient } from "./supabase/server";
 import {
   emitEvent,
@@ -10,43 +16,61 @@ import {
   mergeContext,
   updateWorkflow,
 } from "./store";
+import { money } from "./format";
 import type { AgentName, SharedContext, TravelRequest } from "./types";
 
 // =============================================================================
-// Orchestrator: drives the sequential multi-agent pipeline over the shared
-// context with a human decision point BEFORE every task moves forward:
+// Orchestrator — a TRUE multi-agent control plane.
 //
-//   flight  ─▶ [SELECT a flight]  ─▶ hotel ─▶ [SELECT a hotel]
-//           ─▶ budget ─▶ [APPROVE] ─▶ itinerary ─▶ [APPROVE] ─▶ done
+//   ┌─ Flight ─┐
+//   ├─ Hotel  ─┤
+//   ├─ Activity┤  RESEARCH PHASE — all six planning agents run CONCURRENTLY
+//   ├─ Weather ┤  (Promise.all, one parallel_group). Each autonomously finds
+//   ├─ Transport  and recommends its best option; results land in shared context.
+//   └─ Insights┘
+//        │
+//        ▼
+//     Budget Agent  — combines the plan and computes the total cost
+//        │
+//        ▼  (if over budget) A2A NEGOTIATION — Budget ⇄ Flight/Hotel/Activity/Transport
+//        │  collaboratively optimize via direct messages, up to 3 rounds
+//        ▼
+//   AWAITING APPROVAL — the optimized plan + reasoning is presented to the human,
+//        who can: approve · reject · modify budget · change preferences (prompt).
+//        │  (changing preferences re-runs ONLY the affected agents)
+//        ▼  approve
+//     Itinerary Agent ─▶ completed
 //
-// Flight & Hotel pause for an interactive selection. Budget & Itinerary pause
-// for an approval gate. If the Flight/Hotel providers return no live results
-// (typically a date-availability issue), the workflow pauses for INPUT instead
-// of failing — the operator supplies new dates and the step is retried.
+// The ONLY pauses are the single approval gate and an input-recovery pause when
+// flight/hotel have no live availability for the chosen dates.
 // =============================================================================
+
+const ALL_PLANNING: AgentName[] = [
+  "flight",
+  "hotel",
+  "activity",
+  "weather",
+  "transport",
+  "insights",
+];
 
 const AGENT_LABEL: Record<AgentName, string> = {
   flight: "Flight Agent",
   hotel: "Hotel Agent",
+  activity: "Activity Agent",
+  weather: "Weather Agent",
+  transport: "Transport Agent",
+  insights: "Insights Agent",
   budget: "Budget Agent",
   approval: "Approval Agent",
   itinerary: "Itinerary Agent",
-};
-
-const STEP_DESC: Record<string, string> = {
-  budget: "compute the total trip cost",
-  itinerary: "generate the day-by-day itinerary",
 };
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * A "recoverable" failure is a data/availability problem the operator can fix
- * by adjusting the trip dates (e.g. no flights/hotels for the chosen dates).
- * Configuration problems (missing API key) are NOT recoverable this way.
- */
+/** A "recoverable" failure is a date/availability problem the operator can fix. */
 function isRecoverable(message: string): boolean {
   const m = message.toLowerCase();
   if (m.includes("not configured")) return false;
@@ -55,32 +79,13 @@ function isRecoverable(message: string): boolean {
     m.includes("no available") ||
     m.includes("no hotels") ||
     m.includes("none had a bookable") ||
-    m.includes("returned") // "returned X but none had a bookable …"
+    m.includes("returned")
   );
 }
 
 // ---------------------------------------------------------------------------
-// Pause helpers
+// Pause / gate helpers
 // ---------------------------------------------------------------------------
-
-/** Pause so the operator can pick a flight/hotel option. */
-async function requestSelection(
-  workflowId: string,
-  step: AgentName,
-  count: number
-): Promise<void> {
-  await updateWorkflow(workflowId, {
-    status: "awaiting_selection",
-    current_agent: step,
-  });
-  await emitEvent(workflowId, "selection_required", {
-    agent: step,
-    message: `${AGENT_LABEL[step]} found ${count} option${
-      count === 1 ? "" : "s"
-    } — awaiting your selection`,
-    payload: { step, count },
-  });
-}
 
 /** Pause so the operator can supply corrected input (new trip dates). */
 async function requestInput(
@@ -93,10 +98,7 @@ async function requestInput(
     { inputRequest: { agent: step, kind: "dates", message } },
     { agent: step, message: `Input required — ${message}` }
   );
-  await updateWorkflow(workflowId, {
-    status: "awaiting_input",
-    current_agent: step,
-  });
+  await updateWorkflow(workflowId, { status: "awaiting_input", current_agent: step });
   await emitEvent(workflowId, "input_required", {
     agent: step,
     message,
@@ -104,38 +106,22 @@ async function requestInput(
   });
 }
 
-/** Pause so the operator can review the detailed budget breakdown. */
-async function requestBudgetReview(workflowId: string): Promise<void> {
-  const ctx = await getContext(workflowId);
-  const b = ctx.budget;
-  await updateWorkflow(workflowId, {
-    status: "awaiting_budget_review",
-    current_agent: "budget",
-  });
-  await emitEvent(workflowId, "budget_review_required", {
-    agent: "budget",
-    message: b
-      ? `Budget computed — total ${b.currency} ${b.totalCost} (${
-          b.withinBudget ? "within budget" : `over by ${b.currency} ${b.overage}`
-        }). Review the breakdown.`
-      : "Budget computed — review the breakdown.",
-    payload: { totalCost: b?.totalCost, withinBudget: b?.withinBudget },
-  });
-}
-
-/** Pause at a budget/itinerary approval gate. */
+/** Present the optimized plan and open the single human approval gate. */
 async function requestApproval(
   workflowId: string,
-  step: AgentName,
   ctx: SharedContext
 ): Promise<void> {
   const db = getServiceClient();
   const budget = ctx.budget;
   const overBudget = budget && !budget.withinBudget;
+  const neg = ctx.negotiation;
 
-  const reason = overBudget
-    ? `Budget exceeded by ${budget.currency} ${budget.overage}. Approve to run the ${AGENT_LABEL[step]} — ${STEP_DESC[step]}.`
-    : `Approval required to run the ${AGENT_LABEL[step]} — ${STEP_DESC[step]}.`;
+  let reason = "The agents have planned and optimized your trip. Review the plan.";
+  if (neg?.triggered) reason = neg.summary;
+  else if (overBudget && budget)
+    reason = `Plan ready — total ${money(budget.totalCost, budget.currency)}, over budget by ${money(budget.overage, budget.currency)}.`;
+  else if (budget)
+    reason = `Plan ready and within budget — total ${money(budget.totalCost, budget.currency)} of ${money(budget.budget, budget.currency)}.`;
 
   const { data, error } = await db
     .from("approvals")
@@ -151,19 +137,20 @@ async function requestApproval(
     .single();
   if (error) throw new Error(`create approval: ${error.message}`);
 
+  // Itinerary is the next agent to run once the human approves.
   await updateWorkflow(workflowId, {
     status: "awaiting_approval",
-    current_agent: step,
+    current_agent: "itinerary",
   });
   await emitEvent(workflowId, "approval_required", {
     agent: "approval",
     message: reason,
     payload: {
       approvalId: data.id,
-      step,
       budget: budget?.budget,
       totalCost: budget?.totalCost,
       overage: budget?.overage,
+      withinBudget: budget?.withinBudget,
     },
   });
 }
@@ -183,11 +170,7 @@ async function finalize(workflowId: string): Promise<void> {
 
 async function fail(workflowId: string, err: unknown): Promise<void> {
   const msg = errMsg(err);
-  await updateWorkflow(workflowId, {
-    status: "failed",
-    current_agent: null,
-    error: msg,
-  });
+  await updateWorkflow(workflowId, { status: "failed", current_agent: null, error: msg });
   await emitEvent(workflowId, "workflow_failed", {
     message: `Workflow failed: ${msg}`,
     payload: { error: msg },
@@ -195,142 +178,111 @@ async function fail(workflowId: string, err: unknown): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Step execution: runs one task and sets up the next pause. Flight/Hotel data
-// failures are routed to an input-recovery pause rather than failing the run.
+// Research phase: fan out the requested planning agents CONCURRENTLY. Flight &
+// Hotel use live data and may pause for date-recovery; Activity, Transport,
+// Weather and Insights are auxiliary and degrade gracefully (never fail the run).
 // ---------------------------------------------------------------------------
-async function executeStep(
+type WrapResult = { ok: true } | { ok: false; err: unknown };
+
+async function runResearchPhase(
   workflowId: string,
-  step: AgentName,
+  req: TravelRequest,
+  agents: AgentName[]
+): Promise<{ paused: boolean }> {
+  const group = `research-${Date.now()}`;
+  await updateWorkflow(workflowId, { status: "running", current_agent: agents[0] ?? "flight" });
+  await emitEvent(workflowId, "parallel_started", {
+    message: `Research phase: ${agents.join(", ")} dispatched in parallel`,
+    payload: { parallelGroup: group, agents },
+  });
+
+  const wrap = (p: Promise<unknown>): Promise<WrapResult> =>
+    p.then(() => ({ ok: true as const }), (err) => ({ ok: false as const, err }));
+
+  const jobs: Promise<unknown>[] = [];
+  let flightJob: Promise<WrapResult> | null = null;
+  let hotelJob: Promise<WrapResult> | null = null;
+
+  if (agents.includes("flight")) {
+    flightJob = wrap(runFlightAgent(workflowId, req, group));
+    jobs.push(flightJob);
+  }
+  if (agents.includes("hotel")) {
+    hotelJob = wrap(runHotelAgent(workflowId, req, group));
+    jobs.push(hotelJob);
+  }
+  if (agents.includes("activity")) jobs.push(runActivityAgent(workflowId, req, group));
+  if (agents.includes("transport")) jobs.push(runTransportAgent(workflowId, req, group));
+  if (agents.includes("weather")) jobs.push(runWeatherAgent(workflowId, req, group));
+  if (agents.includes("insights")) jobs.push(runInsightsAgent(workflowId, req, group));
+
+  await Promise.all(jobs);
+
+  if (flightJob) {
+    const r = await flightJob;
+    if (!r.ok) {
+      const msg = errMsg(r.err);
+      if (isRecoverable(msg)) {
+        await requestInput(workflowId, "flight", msg);
+        return { paused: true };
+      }
+      throw r.err;
+    }
+  }
+  if (hotelJob) {
+    const r = await hotelJob;
+    if (!r.ok) {
+      const msg = errMsg(r.err);
+      if (isRecoverable(msg)) {
+        await requestInput(workflowId, "hotel", msg);
+        return { paused: true };
+      }
+      throw r.err;
+    }
+  }
+
+  await emitEvent(workflowId, "parallel_completed", {
+    message: "Research phase complete — all agent recommendations are in",
+    payload: { parallelGroup: group },
+  });
+  return { paused: false };
+}
+
+/**
+ * Combine the agent results with the Budget Agent, run an A2A negotiation if
+ * over budget, then open the approval gate with the optimized plan.
+ */
+async function runPlanningToApproval(
+  workflowId: string,
   req: TravelRequest
 ): Promise<void> {
-  switch (step) {
-    case "flight": {
-      try {
-        await runFlightAgent(workflowId, req);
-      } catch (err) {
-        const msg = errMsg(err);
-        if (isRecoverable(msg)) return requestInput(workflowId, "flight", msg);
-        throw err;
-      }
-      const ctx = await getContext(workflowId);
-      await requestSelection(workflowId, "flight", ctx.flight?.options.length ?? 0);
-      return;
-    }
-    case "hotel": {
-      try {
-        await runHotelAgent(workflowId, req);
-      } catch (err) {
-        const msg = errMsg(err);
-        if (isRecoverable(msg)) return requestInput(workflowId, "hotel", msg);
-        throw err;
-      }
-      const ctx = await getContext(workflowId);
-      await requestSelection(workflowId, "hotel", ctx.hotel?.options.length ?? 0);
-      return;
-    }
-    case "budget": {
-      const ctx = await getContext(workflowId);
-      await runBudgetAgent(workflowId, req, ctx);
-      await requestBudgetReview(workflowId);
-      return;
-    }
-    case "itinerary": {
-      const ctx = await getContext(workflowId);
-      await runItineraryAgent(workflowId, req, ctx);
-      await finalize(workflowId);
-      return;
-    }
-    default:
-      throw new Error(`Unknown step: ${step}`);
+  let ctx = await getContext(workflowId);
+  await runBudgetAgent(workflowId, req, ctx);
+  ctx = await getContext(workflowId);
+  if (ctx.budget && !ctx.budget.withinBudget) {
+    ctx = await runBudgetNegotiation(workflowId, req, ctx);
   }
+  await requestApproval(workflowId, ctx);
 }
 
 // ---------------------------------------------------------------------------
 // Pipeline entrypoints
 // ---------------------------------------------------------------------------
 
-/** Start the pipeline at the Flight Agent. */
+/** Start the pipeline: parallel research → budget → negotiation → approval. */
 export async function runWorkflow(workflowId: string): Promise<void> {
   try {
     const wf = await getWorkflow(workflowId);
     if (!wf) throw new Error("Workflow not found");
-    await executeStep(workflowId, "flight", wf.request);
+    const { paused } = await runResearchPhase(workflowId, wf.request, ALL_PLANNING);
+    if (paused) return;
+    await runPlanningToApproval(workflowId, wf.request);
   } catch (err) {
     await fail(workflowId, err);
   }
 }
 
-/**
- * Apply the operator's flight/hotel selection, then advance:
- *  - after a flight is chosen -> run the Hotel Agent, pause for hotel selection
- *  - after a hotel is chosen  -> open the Budget Agent approval gate
- */
-export async function submitSelection(
-  workflowId: string,
-  optionId: string
-): Promise<void> {
-  try {
-    const wf = await getWorkflow(workflowId);
-    if (!wf) throw new Error("Workflow not found");
-    const req = wf.request;
-    const step = wf.current_agent as AgentName;
-    let ctx = await getContext(workflowId);
-
-    await updateWorkflow(workflowId, { status: "running" });
-
-    if (step === "flight") {
-      const chosen =
-        ctx.flight?.options.find((o) => o.id === optionId) ?? ctx.flight?.selected;
-      if (!chosen) throw new Error("Selected flight option not found");
-      await mergeContext(
-        workflowId,
-        { flight: { selected: chosen, options: ctx.flight?.options ?? [] } },
-        {
-          agent: "flight",
-          message: `Operator selected ${chosen.airline} (${chosen.currency} ${chosen.totalPrice})`,
-        }
-      );
-      await emitEvent(workflowId, "selection_received", {
-        agent: "flight",
-        message: `Flight selected: ${chosen.airline}`,
-        payload: { optionId: chosen.id },
-      });
-
-      await executeStep(workflowId, "hotel", req);
-      return;
-    }
-
-    if (step === "hotel") {
-      const chosen =
-        ctx.hotel?.options.find((o) => o.id === optionId) ?? ctx.hotel?.selected;
-      if (!chosen) throw new Error("Selected hotel option not found");
-      ctx = await mergeContext(
-        workflowId,
-        { hotel: { selected: chosen, options: ctx.hotel?.options ?? [] } },
-        {
-          agent: "hotel",
-          message: `Operator selected ${chosen.name} (${chosen.currency} ${chosen.totalPrice})`,
-        }
-      );
-      await emitEvent(workflowId, "selection_received", {
-        agent: "hotel",
-        message: `Hotel selected: ${chosen.name}`,
-        payload: { optionId: chosen.id },
-      });
-
-      await executeStep(workflowId, "budget", req);
-      return;
-    }
-
-    throw new Error(`Cannot submit a selection for step: ${step}`);
-  } catch (err) {
-    await fail(workflowId, err);
-  }
-}
-
-/**
- * Apply corrected input (new trip dates) and retry the step that needed it.
- */
+/** Apply corrected input (new trip dates) and re-run the full research phase. */
 export async function provideInput(
   workflowId: string,
   input: { departDate: string; returnDate: string }
@@ -338,7 +290,6 @@ export async function provideInput(
   try {
     const wf = await getWorkflow(workflowId);
     if (!wf) throw new Error("Workflow not found");
-    const step = (wf.current_agent ?? "flight") as AgentName;
 
     const depart = input.departDate;
     const ret = input.returnDate;
@@ -363,156 +314,170 @@ export async function provideInput(
     await mergeContext(
       workflowId,
       { request: newReq, inputRequest: null },
-      { agent: step, message: `Trip dates updated to ${depart} → ${ret}` }
+      { agent: "flight", message: `Trip dates updated to ${depart} → ${ret}` }
     );
     await emitEvent(workflowId, "input_received", {
-      agent: step,
+      agent: "flight",
       message: `Dates updated: ${depart} → ${ret}`,
       payload: { departDate: depart, returnDate: ret, days },
     });
 
-    await executeStep(workflowId, step, newReq);
+    const { paused } = await runResearchPhase(workflowId, newReq, ALL_PLANNING);
+    if (paused) return;
+    await runPlanningToApproval(workflowId, newReq);
   } catch (err) {
     await fail(workflowId, err);
   }
 }
 
 /**
- * The operator has reviewed the budget breakdown — open the approval gate
- * (approve / modify budget / reject) before the Itinerary Agent runs.
+ * Manual override: the operator picks a specific flight or hotel option from
+ * the agent's list. We set it as the selection, then recompute the budget and
+ * re-run negotiation so the plan (and approval gate) reflect their choice.
  */
-export async function acknowledgeBudget(workflowId: string): Promise<void> {
+export async function overrideSelection(
+  workflowId: string,
+  kind: "flight" | "hotel",
+  optionId: string
+): Promise<void> {
   try {
     const wf = await getWorkflow(workflowId);
     if (!wf) throw new Error("Workflow not found");
     const ctx = await getContext(workflowId);
     await updateWorkflow(workflowId, { status: "running" });
-    await requestApproval(workflowId, "itinerary", ctx);
+
+    if (kind === "flight") {
+      const chosen = ctx.flight?.options.find((o) => o.id === optionId);
+      if (!chosen) throw new Error("Selected flight option not found");
+      await mergeContext(
+        workflowId,
+        { flight: { selected: chosen, options: ctx.flight?.options ?? [] } },
+        {
+          agent: "flight",
+          message: `Operator manually selected ${chosen.airline} (${money(chosen.totalPrice, chosen.currency)})`,
+        }
+      );
+      await emitEvent(workflowId, "selection_received", {
+        agent: "flight",
+        message: `Flight manually selected: ${chosen.airline}`,
+        payload: { optionId: chosen.id },
+      });
+    } else {
+      const chosen = ctx.hotel?.options.find((o) => o.id === optionId);
+      if (!chosen) throw new Error("Selected hotel option not found");
+      await mergeContext(
+        workflowId,
+        { hotel: { selected: chosen, options: ctx.hotel?.options ?? [] } },
+        {
+          agent: "hotel",
+          message: `Operator manually selected ${chosen.name} (${money(chosen.totalPrice, chosen.currency)})`,
+        }
+      );
+      await emitEvent(workflowId, "selection_received", {
+        agent: "hotel",
+        message: `Hotel manually selected: ${chosen.name}`,
+        payload: { optionId: chosen.id },
+      });
+    }
+
+    await runPlanningToApproval(workflowId, wf.request);
   } catch (err) {
     await fail(workflowId, err);
   }
 }
 
 /**
- * Estimate the total cost for a (flight, hotel) pair using the same formula as
- * the Budget Agent so the optimizer's choice matches the recomputed breakdown.
+ * Determine which planning agents are affected by a change in the request, so
+ * that "change preferences" only re-runs what actually changed.
  */
-function estimateTotal(
-  req: TravelRequest,
-  targetBudget: number,
-  flightCost: number,
-  hotelCost: number
-): number {
-  const perDayPerPerson = Math.round((targetBudget * 0.04) / req.days);
-  const activities = perDayPerPerson * req.days * req.travelers;
-  const contingency = Math.round((flightCost + hotelCost) * 0.1);
-  const misc = activities + contingency;
-  return flightCost + hotelCost + misc;
+function affectedAgents(
+  oldReq: TravelRequest,
+  newReq: TravelRequest
+): AgentName[] {
+  const set = new Set<AgentName>();
+  const destChanged =
+    oldReq.destinationCode !== newReq.destinationCode ||
+    oldReq.destinationCity !== newReq.destinationCity ||
+    oldReq.destinationCountry !== newReq.destinationCountry;
+  const datesChanged =
+    oldReq.departDate !== newReq.departDate ||
+    oldReq.returnDate !== newReq.returnDate ||
+    oldReq.days !== newReq.days;
+  const originChanged = oldReq.originCode !== newReq.originCode;
+  const travelersChanged = oldReq.travelers !== newReq.travelers;
+  const prefsChanged =
+    JSON.stringify([...oldReq.preferences].sort()) !==
+    JSON.stringify([...newReq.preferences].sort());
+  const airlineChanged = (oldReq.preferredAirline ?? "") !== (newReq.preferredAirline ?? "");
+
+  if (destChanged || datesChanged) {
+    ALL_PLANNING.forEach((a) => set.add(a));
+  }
+  if (originChanged) set.add("flight");
+  if (airlineChanged) set.add("flight");
+  if (travelersChanged) {
+    ["flight", "hotel", "activity", "transport"].forEach((a) => set.add(a as AgentName));
+  }
+  if (prefsChanged) {
+    // Preferences (luxury/budget/airline/interests) influence what the Flight,
+    // Hotel, Activity and Insights agents recommend — re-run all four.
+    ["flight", "hotel", "activity", "insights"].forEach((a) => set.add(a as AgentName));
+  }
+  // budget-only changes affect no planning agent — just a budget recompute.
+  return [...set];
 }
 
 /**
- * Auto-match the trip to a target budget: pick the flight + hotel combination
- * (from the already-fetched live options) whose estimated total is as close as
- * possible to — and preferably within — the target. Then recompute the budget
- * and pause on the budget review so the operator sees what the agent matched.
+ * Apply a free-text preference change. Re-parses the request, re-runs ONLY the
+ * affected agents in parallel, then recomputes/negotiates and re-gates approval.
  */
-export async function autoMatchBudget(
+export async function changePreferences(
   workflowId: string,
-  targetBudget: number
+  prompt: string
 ): Promise<void> {
   try {
     const wf = await getWorkflow(workflowId);
     if (!wf) throw new Error("Workflow not found");
-    if (!targetBudget || targetBudget <= 0) {
-      throw new Error("A positive target budget is required to auto-match");
-    }
+    const oldReq = wf.request;
+    const newReq = await parsePreferenceChange(oldReq, prompt);
+    const affected = affectedAgents(oldReq, newReq);
 
-    const ctx = await getContext(workflowId);
-    const flightOptions = ctx.flight?.options ?? [];
-    const hotelOptions = ctx.hotel?.options ?? [];
-    if (!flightOptions.length || !hotelOptions.length) {
-      throw new Error("No flight/hotel options available to auto-match");
-    }
-
-    const previousTotal = ctx.budget?.totalCost ?? 0;
-    const newReq: TravelRequest = { ...wf.request, budget: targetBudget };
-
-    // Search every flight × hotel combination for the best fit.
-    let best: { flightId: string; hotelId: string; total: number } | null = null;
-    for (const f of flightOptions) {
-      for (const h of hotelOptions) {
-        const total = estimateTotal(newReq, targetBudget, f.totalPrice, h.totalPrice);
-        if (!best) {
-          best = { flightId: f.id, hotelId: h.id, total };
-          continue;
-        }
-        const within = total <= targetBudget;
-        const bestWithin = best.total <= targetBudget;
-        // Prefer the combination closest to the target without exceeding it.
-        if (within && bestWithin) {
-          if (total > best.total) best = { flightId: f.id, hotelId: h.id, total };
-        } else if (within && !bestWithin) {
-          best = { flightId: f.id, hotelId: h.id, total };
-        } else if (!within && !bestWithin) {
-          if (total < best.total) best = { flightId: f.id, hotelId: h.id, total };
-        }
-      }
-    }
-    if (!best) throw new Error("Could not determine a matching combination");
-
-    const flight = flightOptions.find((o) => o.id === best!.flightId)!;
-    const hotel = hotelOptions.find((o) => o.id === best!.hotelId)!;
-
+    await updateWorkflow(workflowId, {
+      request: newReq,
+      budget: newReq.budget,
+      status: "running",
+      current_agent: affected[0] ?? "budget",
+    });
     await mergeContext(
       workflowId,
-      {
-        flight: { selected: flight, options: flightOptions },
-        hotel: { selected: hotel, options: hotelOptions },
-      },
+      { request: newReq },
       {
         agent: "budget",
-        message: `Auto-matched selections: ${flight.airline} + ${hotel.name}`,
+        message: `Preferences updated — re-running ${
+          affected.length ? affected.join(", ") : "budget only"
+        }`,
       }
     );
+    await emitEvent(workflowId, "input_received", {
+      agent: "budget",
+      message: `Preference change applied: "${prompt}"`,
+      payload: { affected, prompt },
+    });
 
-    await updateWorkflow(workflowId, { request: newReq, budget: targetBudget });
-
-    // Recompute the budget with the new selections + target budget.
-    const recomputed = await runBudgetAgent(workflowId, newReq, await getContext(workflowId), targetBudget);
-    const b = recomputed.budget;
-    const withinBudget = !!b && b.withinBudget;
-
-    const message = withinBudget
-      ? `Matched your budget of ${newReq.currency} ${targetBudget}. Selected the closest flight (${flight.airline}) and hotel (${hotel.name}) — new estimated total ${newReq.currency} ${b?.totalCost}.`
-      : `Optimized as close as possible to ${newReq.currency} ${targetBudget}. Picked the most affordable flight (${flight.airline}) and hotel (${hotel.name}) — estimated total ${newReq.currency} ${b?.totalCost}.`;
-
-    await mergeContext(
-      workflowId,
-      {
-        autoMatch: {
-          applied: true,
-          message,
-          targetBudget,
-          previousTotal,
-          newTotal: b?.totalCost ?? 0,
-          withinBudget,
-        },
-      },
-      { agent: "budget", message }
-    );
-
-    await requestBudgetReview(workflowId);
+    if (affected.length) {
+      const { paused } = await runResearchPhase(workflowId, newReq, affected);
+      if (paused) return;
+    }
+    await runPlanningToApproval(workflowId, newReq);
   } catch (err) {
     await fail(workflowId, err);
   }
 }
 
 /**
- * Resume after a budget/itinerary approval decision.
- *  - approve        -> run the gated step, then open the next gate (or finish)
- *  - update_budget  -> recompute the budget breakdown against the new budget
- *                      and re-open the SAME gate with refreshed numbers
- *  - reject         -> handled in the command route (marks workflow rejected)
+ * Resume after an approval decision.
+ *  - approve       -> run the Itinerary Agent and finish
+ *  - update_budget -> recompute against the new budget, re-negotiate, re-gate
  */
 export async function resumeWorkflow(
   workflowId: string,
@@ -521,46 +486,33 @@ export async function resumeWorkflow(
   try {
     const wf = await getWorkflow(workflowId);
     if (!wf) throw new Error("Workflow not found");
-    const req = wf.request;
-    const step = (wf.current_agent ?? "budget") as AgentName;
 
-    // --- Modify budget: recompute and re-gate the same step. ---------------
+    // --- Modify budget: recompute + re-negotiate, then re-open the gate. ---
     if (opts.newBudget && opts.newBudget > 0) {
-      let ctx = await getContext(workflowId);
-      await updateWorkflow(workflowId, { budget: opts.newBudget });
-
-      if (ctx.budget) {
-        ctx = await runBudgetAgent(workflowId, req, ctx, opts.newBudget);
-      }
-
+      const newReq: TravelRequest = { ...wf.request, budget: opts.newBudget };
+      await updateWorkflow(workflowId, { request: newReq, budget: opts.newBudget });
       await mergeContext(
         workflowId,
         {
-          approval: {
-            required: true,
-            resolution: "update_budget",
-            newBudget: opts.newBudget,
-          },
+          request: newReq,
+          approval: { required: true, resolution: "update_budget", newBudget: opts.newBudget },
         },
-        {
-          agent: "approval",
-          message: `Budget updated to ${req.currency} ${opts.newBudget}`,
-        }
+        { agent: "approval", message: `Budget updated to ${money(opts.newBudget, newReq.currency)}` }
       );
-
-      await requestApproval(workflowId, step, ctx);
+      await runPlanningToApproval(workflowId, newReq);
       return;
     }
 
-    // --- Approve: run the gated step, then advance. ------------------------
-    await updateWorkflow(workflowId, { status: "running" });
+    // --- Approve: generate the itinerary and complete. ---------------------
+    await updateWorkflow(workflowId, { status: "running", current_agent: "itinerary" });
     await mergeContext(
       workflowId,
       { approval: { required: false, resolution: "approve" } },
-      { agent: "approval", message: `${AGENT_LABEL[step]} approved` }
+      { agent: "approval", message: "Plan approved — generating itinerary" }
     );
-
-    await executeStep(workflowId, step, req);
+    const ctx = await getContext(workflowId);
+    await runItineraryAgent(workflowId, wf.request, ctx);
+    await finalize(workflowId);
   } catch (err) {
     await fail(workflowId, err);
   }

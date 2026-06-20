@@ -3,10 +3,23 @@
 import type { AgentRunRow, SharedContext, WorkflowRow } from "@/lib/types";
 import { money } from "@/lib/format";
 
-const PIPELINE = ["flight", "hotel", "budget", "itinerary"] as const;
+const PIPELINE = [
+  "flight",
+  "hotel",
+  "activity",
+  "weather",
+  "transport",
+  "insights",
+  "budget",
+  "itinerary",
+] as const;
 const LABEL: Record<string, string> = {
   flight: "Flight Agent",
   hotel: "Hotel Agent",
+  activity: "Activity Agent",
+  weather: "Weather Agent",
+  transport: "Transport Agent",
+  insights: "Insights Agent",
   budget: "Budget Agent",
   approval: "Approval Agent",
   itinerary: "Itinerary Agent",
@@ -27,15 +40,15 @@ export function TripSummary({
   const completed = new Set(
     agentRuns.filter((r) => r.status === "completed").map((r) => r.agent)
   );
-  // 5 agents total: flight, hotel, budget, approval, itinerary.
-  // The Approval Agent is a human-in-the-loop gate (no run row), so it counts
-  // as done once it has been resolved or the workflow has completed.
+  // 9 agents total: 6 planning agents (parallel) + budget + approval + itinerary.
+  // The Approval Agent is a human gate (no run row); it counts as done once the
+  // approval is resolved or the workflow has completed.
   let done = PIPELINE.filter((a) => completed.has(a)).length;
   const approvalResolved =
     workflow.status === "completed" ||
     (!!context.approval && context.approval.required === false);
   if (approvalResolved) done += 1;
-  const total = 5;
+  const total = 9;
   const pct = Math.round((done / total) * 100);
 
   let stageLabel = "Workflow complete";
@@ -43,18 +56,12 @@ export function TripSummary({
     stageLabel = `Action needed — adjust dates for ${
       LABEL[workflow.current_agent] ?? "search"
     }`;
-  } else if (workflow.status === "awaiting_selection" && workflow.current_agent) {
-    stageLabel = `Awaiting your selection — ${
-      LABEL[workflow.current_agent] ?? "options"
-    }`;
-  } else if (workflow.status === "awaiting_approval" && workflow.current_agent) {
-    stageLabel = `Awaiting approval — ${LABEL[workflow.current_agent] ?? "next task"}`;
-  } else if (workflow.status === "awaiting_budget_review") {
-    stageLabel = "Review the budget breakdown";
+  } else if (workflow.status === "awaiting_approval") {
+    stageLabel = "Optimized plan ready — awaiting your decision";
   } else if (workflow.status === "running" && workflow.current_agent) {
-    stageLabel = `${LABEL[workflow.current_agent] ?? "Agent"} running`;
+    stageLabel = `Agents working — ${LABEL[workflow.current_agent] ?? "planning"}…`;
   } else if (workflow.status === "pending" || workflow.status === "running") {
-    stageLabel = "Initializing workflow — starting Flight Agent…";
+    stageLabel = "Dispatching planning agents in parallel…";
   } else if (workflow.status === "failed") {
     stageLabel = "Workflow failed";
   } else if (workflow.status === "rejected") {
